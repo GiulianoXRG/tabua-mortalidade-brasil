@@ -101,3 +101,42 @@ comparar_pop_brpop <- function(pop_ibge) {
     dplyr::inner_join(brpop_br, by = c("ano", "grupo")) |>
     dplyr::mutate(dif_pct = 100 * (.data$pop_brpop / .data$pop_ibge - 1))
 }
+
+#' Baixa a população do Censo 2022 por sexo e idade simples (SIDRA 9514)
+#'
+#' Consulta a API do SIDRA (tabela 9514, universo do Censo Demográfico
+#' 2022): população residente por sexo e idade, Brasil. Grava o JSON bruto.
+#'
+#' @param dir_raw Pasta de destino.
+#' @return Caminho do arquivo JSON.
+#' @export
+baixar_censo_sidra <- function(dir_raw = here::here("data", "raw", "ibge")) {
+  dir.create(dir_raw, recursive = TRUE, showWarnings = FALSE)
+  destino <- file.path(dir_raw, "censo2022_sidra9514.json")
+  if (!file.exists(destino)) {
+    url <- paste0(
+      "https://apisidra.ibge.gov.br/values/t/9514/n1/all/v/93/p/2022",
+      "/c2/4,5/c287/all/c286/113635/f/n"
+    )
+    utils::download.file(url, destino, mode = "wb", quiet = TRUE)
+  }
+  destino
+}
+
+#' Lê a população do Censo 2022 em idade simples (0 a 100+)
+#'
+#' @param caminho JSON gerado por [baixar_censo_sidra()].
+#' @return Tibble com `sexo`, `idade` (100 = 100+) e `pop`.
+#' @export
+ler_censo_sidra <- function(caminho) {
+  bruto <- jsonlite::fromJSON(caminho)[-1, ]
+  tibble::tibble(sexo = bruto$D4N, rotulo = bruto$D5N, pop = as.numeric(bruto$V)) |>
+    dplyr::filter(grepl("^([0-9]+ anos?( ou mais)?|Menos de 1 ano)$", .data$rotulo)) |>
+    dplyr::transmute(
+      sexo  = dplyr::if_else(.data$sexo == "Homens", "Masculino", "Feminino"),
+      idade = dplyr::if_else(.data$rotulo == "Menos de 1 ano", 0L,
+                             suppressWarnings(as.integer(sub(" .*", "", .data$rotulo)))),
+      pop   = .data$pop
+    ) |>
+    dplyr::arrange(.data$sexo, .data$idade)
+}
