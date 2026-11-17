@@ -107,7 +107,15 @@ list(
     grafico_residuos(lc$residuos, "pre_covid"), "lc_residuos_pre_covid", altura = 5.5),
     format = "file"),
   tar_target(fig_backtest, salvar_figura(grafico_backtest(backtest), "lc_backtest"),
-             format = "file")
+             format = "file"),
 
-  # Etapa 5 — relatório Quarto
+  # Etapa 5 — relatório Quarto ----------------------------------------------
+  tar_quarto(relatorio, "report/relatorio.qmd", working_directory = "."),
+  tar_target(pagina, {
+    dir.create(here::here("docs"), showWarnings = FALSE)
+    html <- grep("\\.html$", relatorio, value = TRUE)
+    destino <- here::here("docs", "index.html")
+    file.copy(html, destino, overwrite = TRUE)
+    destino
+  }, format = "file")
 )
