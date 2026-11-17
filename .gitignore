@@ -1,0 +1,32 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rcheck/
+
+# renv (biblioteca local; o lockfile é versionado)
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# targets
+_targets/
+
+# Dados brutos (baixados pelo pipeline)
+data/raw/*
+!data/raw/.gitkeep
+
+# Quarto
+report/*_files/
+report/.quarto/
+report/*.html
+/.quarto/
+
+# Sistema
+.DS_Store
+Thumbs.db
