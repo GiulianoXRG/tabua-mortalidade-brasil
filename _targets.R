@@ -59,9 +59,28 @@ list(
     ggplot2::ggsave(caminho, grafico_cobertura_sim(obitos, indicadores_ibge),
                     width = 8, height = 4.5, dpi = 150, bg = "white")
     caminho
-  }, format = "file")
+  }, format = "file"),
 
-  # Etapa 3 — tábua de mortalidade
+  # Etapa 3 — tábua de mortalidade ------------------------------------------
+  tar_target(resultado_tabuas, construir_tabuas(obitos, populacao, cfg)),
+  tar_target(tabuas, resultado_tabuas$tabuas),
+  tar_target(mx, resultado_tabuas$mx),
+  tar_target(ajustes_velhice, resultado_tabuas$ajustes),
+  tar_target(comp_e0, comparar_e0_ibge(tabuas, indicadores_ibge)),
+  tar_target(comp_censo, comparar_abertura_censo(mx, censo2022, 2022)),
+
+  tar_target(tabuas_parquet, salvar_parquet(tabuas, "tabuas_mortalidade"), format = "file"),
+  tar_target(mx_parquet, salvar_parquet(mx, "mx_exposicao"), format = "file"),
+  tar_target(comp_e0_parquet, salvar_parquet(comp_e0, "comparacao_e0_ibge"), format = "file"),
+
+  tar_target(fig_mx, salvar_figura(grafico_mx(mx), "mx_por_idade"), format = "file"),
+  tar_target(fig_suaviz, salvar_figura(grafico_suavizacao(mx, 2019), "suavizacao_kannisto"),
+             format = "file"),
+  tar_target(fig_e0_ibge, salvar_figura(grafico_e0_ibge(comp_e0), "e0_vs_ibge"),
+             format = "file"),
+  tar_target(fig_censo, salvar_figura(grafico_abertura_censo(comp_censo), "abertura_90_censo"),
+             format = "file")
+
   # Etapa 4 — Lee-Carter (ajuste, projeção, diagnóstico, backtesting)
   # Etapa 5 — relatório Quarto
 )
