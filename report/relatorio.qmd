@@ -74,8 +74,8 @@ Todo o processo é reprodutível com `renv::restore()` e `targets::tar_make()`.
 **Por que não o `brpop`?** O pacote `brpop` só oferece a população em grupos
 quinquenais até 80+, o que não basta para uma tábua em idade simples. Ele foi
 usado como checagem: a diferença no total da população em relação ao IBGE
-fica abaixo de `r num(max(abs(checagem_brpop |> group_by(ano) |> summarise(d = 100 * (sum(pop_brpop) / sum(pop_ibge) - 1)) |> pull(d))), 1)`%
-em todos os anos de 2000 a 2021.
+é de no máximo `r num(max(abs(checagem_brpop |> group_by(ano) |> summarise(d = 100 * (sum(pop_brpop) / sum(pop_ibge) - 1)) |> pull(d))), 2)`%
+entre 2000 e 2021.
 
 ## Qualidade da informação no SIM
 
@@ -131,15 +131,35 @@ $$
 $$
 
 ajustado por máxima verossimilhança de Poisson nas idades 80–89, as últimas
-com população em idade simples. Escolhemos Kannisto em vez de Gompertz por
-três motivos:
+com população em idade simples.
 
-* ele captura a **desaceleração** da mortalidade nas idades muito
-  avançadas, enquanto o Gompertz cresce exponencialmente sem limite;
-* é o modelo de referência do *Human Mortality Database* para idades 80+;
-* teve **AIC menor que o Gompertz em
-  `r sum(ajustes_velhice |> select(ano, sexo, modelo, aic) |> pivot_wider(names_from = modelo, values_from = aic) |> mutate(k = kannisto < gompertz) |> pull(k))`
-  dos `r nrow(ajustes_velhice) / 2` ajustes** (ano × sexo).
+**Kannisto ou Gompertz?** Na própria faixa de ajuste (80–89), o Gompertz teve
+AIC menor em
+`r sum(ajustes_velhice |> select(ano, sexo, modelo, aic) |> pivot_wider(names_from = modelo, values_from = aic) |> mutate(g = gompertz < kannisto) |> pull(g))`
+dos `r nrow(ajustes_velhice) / 2` ajustes (ano × sexo): até os 89 anos a
+desaceleração da mortalidade ainda é pequena. Mas a função do modelo aqui é
+**extrapolar** além dos 90. Para testar isso fora da amostra, comparamos as
+taxas previstas com as observadas em 2022, ano em que o Censo dá a população
+em idade simples até 100+ (@tbl-validacao). O Gompertz acerta melhor entre
+91 e 95 anos, mas **superestima a mortalidade a partir de 96 anos**, porque
+cresce exponencialmente sem limite. O Kannisto, que tem assíntota em 1,
+acompanha as taxas observadas nas idades mais altas. Como o grupo 100+ e a
+expectativa de vida nas idades avançadas dependem justamente dessa cauda,
+adotamos o **Kannisto**, também usado pelo *Human Mortality Database* nas
+idades 80+.
+
+```{r}
+#| label: tbl-validacao
+#| tbl-cap: "Taxas de mortalidade em 90–99 anos (2022): observadas (SIM / Censo 2022) e previstas pelos modelos ajustados em 80–89"
+tar_read(valid_velhice) |>
+  filter(idade %in% c(90, 92, 94, 96, 98, 99)) |>
+  transmute(Sexo = sexo, Idade = idade,
+            Observada = num(mx_obs, 3), Kannisto = num(kannisto, 3),
+            Gompertz = num(gompertz, 3),
+            `Erro Kannisto` = paste0(num(100 * (kannisto / mx_obs - 1), 0), "%"),
+            `Erro Gompertz` = paste0(num(100 * (gompertz / mx_obs - 1), 0), "%")) |>
+  kable(align = "lrrrrrr")
+```
 
 O grupo aberto 90+ da população foi dividido em 90, 91, …, 100+ segundo a
 **população estacionária** do modelo ajustado,
@@ -261,8 +281,8 @@ têm três origens:
    subestimada e a e0, superestimada. A queda da diferença ao longo do tempo
    acompanha a melhora da cobertura (@fig-cobertura).
 2. **Mortalidade infantil.** O sub-registro de óbitos infantis é
-   historicamente maior. Como a e0 é muito sensível a $q_0$, essa é a
-   principal fonte da diferença no início do período.
+   historicamente maior e, como a e0 é muito sensível a $q_0$, deve
+   responder por boa parte da diferença no início do período.
 3. **Idades avançadas.** O IBGE usa métodos próprios para fechar a tábua; aqui
    usamos Kannisto a partir dos 80 anos.
 
@@ -281,8 +301,15 @@ fig(tar_read(fig_ax_bx))
 O $a_x$ reproduz o formato clássico da curva de mortalidade: alto no
 primeiro ano, mínimo por volta dos 10 anos, a "corcova" de causas externas
 entre homens jovens e crescimento quase log-linear na idade adulta. O $b_x$
-mostra **em que idades a mortalidade mais caiu**: valores altos na infância
-indicam que a queda da mortalidade infantil puxou a melhora no período.
+mostra **em que idades a mortalidade mais caiu**:
+
+* valores altos na infância (queda da mortalidade infantil) e entre 30 e
+  70 anos;
+* **valores negativos entre homens de 15 a 25 anos**: nessas idades a
+  mortalidade *subiu* no período, efeito da violência (causas externas);
+* $b_x$ negativo também nas idades 85+, onde a mortalidade medida pelo SIM
+  aumentou. Isso é coerente com a melhora da cobertura do registro de óbitos
+  de idosos, não necessariamente com uma piora real.
 
 ```{r}
 #| label: fig-kt
@@ -290,10 +317,13 @@ indicam que a queda da mortalidade infantil puxou a melhora no período.
 fig(tar_read(fig_kt))
 ```
 
-No cenário com COVID, o $k_t$ sobe bruscamente em 2020–2021, o que reduz a
-inclinação média (drift) da série e torna a projeção **mais pessimista**.
-O passeio aleatório trata o choque como permanente: o nível de 2023 é o
-ponto de partida, e o drift estimado incorpora o salto.
+No cenário com COVID, o $k_t$ salta de cerca de −9 em 2019 para
+`r num(tar_read(lc)$kt |> filter(cenario == "completo", ano == 2021) |> pull(kt) |> max(), 0)`
+em 2021 e volta ao nível pré-pandemia já em 2023. Como o drift de um passeio
+aleatório depende só do primeiro e do último ponto da série
+($\hat\delta = (k_T - k_1)/(T - 1)$), o choque **quase não altera a tendência
+central**. O que muda é a **volatilidade estimada**: a variância dos
+incrementos de $k_t$ explode, e com ela a largura dos intervalos.
 
 ## Projeção da expectativa de vida
 
@@ -324,15 +354,33 @@ lc_e |>
 ```
 
 Em 2050, o cenário pré-COVID projeta e0 de
-`r num(proj("pre_covid", "Feminino", "e0", 2050))` anos para mulheres e
-`r num(proj("pre_covid", "Masculino", "e0", 2050))` para homens. Com a
-COVID no ajuste, os valores caem para
-`r num(proj("completo", "Feminino", "e0", 2050))` e
-`r num(proj("completo", "Masculino", "e0", 2050))`. A **escolha da
-janela de ajuste é uma decisão atuarial relevante**: tratar 2020–2021 como
-choque transitório (excluí-lo, dar-lhe peso menor ou modelá-lo como
-*outlier*) ou como parte da tendência muda a longevidade projetada em uma
-magnitude comparável ao próprio intervalo de confiança.
+`r num(proj("pre_covid", "Feminino", "e0", 2050))` anos para mulheres
+(IC 95%: `r num(proj("pre_covid", "Feminino", "e0", 2050, "inf95"))`–`r num(proj("pre_covid", "Feminino", "e0", 2050, "sup95"))`)
+e `r num(proj("pre_covid", "Masculino", "e0", 2050))` para homens. Com a
+COVID no ajuste, as estimativas centrais quase não mudam
+(`r num(proj("completo", "Feminino", "e0", 2050))` e
+`r num(proj("completo", "Masculino", "e0", 2050))`), mas o IC 95% para
+mulheres passa a ir de
+`r num(proj("completo", "Feminino", "e0", 2050, "inf95"))` a
+`r num(proj("completo", "Feminino", "e0", 2050, "sup95"))` anos.
+
+Duas conclusões para a prática atuarial:
+
+1. **A COVID afeta mais a incerteza que a tendência.** Incluir 2020–2021 sem
+   tratamento faz o modelo tratar choques dessa magnitude como recorrentes,
+   e os intervalos ficam largos demais para serem úteis. As alternativas
+   usuais são excluir esses anos, dar-lhes peso menor ou modelá-los como
+   *outliers* (intervenção no ARIMA de $k_t$).
+2. **As projeções ficam abaixo das do IBGE** (em 2050, e0 de
+   `r num(tar_read(ibge_proj) |> filter(ano == 2050, sexo == "Feminino") |> pull(e0_ibge))`
+   anos para mulheres e
+   `r num(tar_read(ibge_proj) |> filter(ano == 2050, sexo == "Masculino") |> pull(e0_ibge))`
+   para homens). O motivo é o mesmo sub-registro visto acima: a cobertura do
+   SIM passou de cerca de 85% para 98% entre 2000 e 2019, então parte da
+   queda real da mortalidade ficou escondida pelo aumento dos óbitos
+   registrados. O drift de $k_t$ sai **subestimado**, e com ele o ganho de
+   longevidade projetado, um viés que, em previdência, leva a subestimar
+   passivos.
 
 # Diagnóstico
 
@@ -354,12 +402,21 @@ Os resíduos de um Lee-Carter bem especificado não deveriam ter padrão. Aqui
 há três estruturas conhecidas:
 
 * **2020–2021** aparecem como colunas fortemente positivas nas idades
-  adultas e idosas: a COVID elevou a mortalidade de um modo que um único
-  $b_x$ não descreve;
-* **diagonais** indicam efeito de coorte, que o Lee-Carter ignora (o modelo
-  de Renshaw-Haberman o incluiria);
+  adultas e idosas e negativas na infância: a COVID elevou a mortalidade
+  sobretudo dos mais velhos, um padrão etário diferente do $b_x$ histórico,
+  que é alto na infância. Um único fator não descreve os dois movimentos.
+  No ajuste pré-COVID essas colunas desaparecem;
+* uma **faixa positiva entre homens de 12 a 25 anos na década de 2010**
+  reflete a dinâmica própria da mortalidade por violência, que não segue o
+  índice geral $k_t$;
 * nas **idades 80+**, os resíduos refletem a variação ano a ano dos
-  parâmetros do Kannisto, que não segue exatamente a estrutura $a_x + b_x k_t$.
+  parâmetros do Kannisto, que não segue exatamente a estrutura
+  $a_x + b_x k_t$;
+* resíduos positivos na **idade 0 no início da série** combinam com a queda
+  mais rápida da mortalidade infantil nesse período.
+
+Modelos com mais fatores ou com efeito de coorte (Renshaw-Haberman, por
+exemplo) poderiam capturar parte dessas estruturas.
 
 ## Backtesting
 
