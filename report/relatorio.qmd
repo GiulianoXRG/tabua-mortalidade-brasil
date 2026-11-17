@@ -1,23 +1,426 @@
 ---
 title: "Tábua de mortalidade brasileira e projeção Lee-Carter"
+subtitle: "Brasil, 2000–2023, com projeção até 2050"
+author: "GiulianoXRG"
+date: today
+date-format: "DD/MM/YYYY"
 lang: pt-BR
 format:
   html:
     toc: true
+    toc-depth: 2
     number-sections: true
     code-fold: true
+    code-summary: "Mostrar código"
     embed-resources: true
+    theme: cosmo
+    fig-align: center
 execute:
   echo: false
   warning: false
+  message: false
 ---
+
+```{r}
+#| label: setup
+library(targets)
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+tar_load(c(config, qualidade_sim, comp_e0, ajustes_velhice, backtest, comp_censo,
+           checagem_brpop, tabuas))
+lc_e <- tar_read(lc)$e
+
+fig <- function(alvo) include_graphics(alvo)
+num <- function(x, d = 1) formatC(x, format = "f", digits = d, decimal.mark = ",", big.mark = ".")
+
+e0 <- function(a, s) comp_e0$e0_calc[comp_e0$ano == a & comp_e0$sexo == s]
+e0i <- function(a, s) comp_e0$e0_ibge[comp_e0$ano == a & comp_e0$sexo == s]
+proj <- function(cen, s, ind, a, col = "central") {
+  lc_e[[col]][lc_e$cenario == cen & lc_e$sexo == s & lc_e$indicador == ind & lc_e$ano == a]
+}
+```
 
 # Introdução
 
+Uma **tábua de mortalidade** resume, para cada idade, a probabilidade de morrer
+e a expectativa de vida de uma população. É a base do cálculo atuarial de
+seguros de vida, previdência e anuidades. Como a mortalidade cai ao longo do
+tempo, tábuas estáticas subestimam a longevidade, por isso é preciso
+**projetar** a mortalidade.
+
+Este trabalho:
+
+1. constrói tábuas de mortalidade completas (idade simples, 0 a 100+) para o
+   Brasil, por sexo, de 2000 a 2023, apenas com dados abertos;
+2. ajusta o modelo de **Lee-Carter** e projeta a mortalidade até 2050, com
+   intervalos de confiança para a expectativa de vida ao nascer (e0) e aos
+   65 anos (e65);
+3. avalia o efeito da pandemia de COVID-19 (2020–2021) na projeção,
+   comparando os ajustes de 2000–2019 e 2000–2023.
+
+Todo o processo é reprodutível com `renv::restore()` e `targets::tar_make()`.
+
 # Dados
+
+| Informação | Fonte | Detalhe |
+|---|---|---|
+| Óbitos | SIM/DATASUS, declarações de óbito (SIM-DO) | `microdatasus::fetch_datasus()` e `process_sim()`, todas as UFs, 2000–2023, por ano de ocorrência e UF de residência |
+| População | IBGE, Projeções da População, Revisão 2024, Tabela 1 | População em 1º de julho, por sexo e idade simples (0 a 89 e 90+) |
+| Indicadores oficiais | IBGE, Projeções da População, Revisão 2024, Tabela 4 | e0, e60 e óbitos implícitos, por sexo |
+| Idades 90+ | IBGE, Censo Demográfico 2022, SIDRA tabela 9514 | População por sexo e idade simples até 100+ (checagem) |
+
+**Por que não o `brpop`?** O pacote `brpop` só oferece a população em grupos
+quinquenais até 80+, o que não basta para uma tábua em idade simples. Ele foi
+usado como checagem: a diferença no total da população em relação ao IBGE
+fica abaixo de `r num(max(abs(checagem_brpop |> group_by(ano) |> summarise(d = 100 * (sum(pop_brpop) / sum(pop_ibge) - 1)) |> pull(d))), 1)`%
+em todos os anos de 2000 a 2021.
+
+## Qualidade da informação no SIM
+
+Os óbitos com idade ou sexo ignorados são poucos e foram redistribuídos
+proporcionalmente: primeiro a idade ignorada, segundo a distribuição etária
+do mesmo sexo e ano; depois o sexo ignorado, segundo a razão de sexo da mesma
+idade e ano. O total de óbitos é preservado.
+
+```{r}
+#| label: tbl-qualidade
+#| tbl-cap: "Óbitos registrados no SIM e percentual com idade ou sexo ignorados"
+qualidade_sim |>
+  filter(ano %in% c(2000, 2005, 2010, 2015, 2019, 2020, 2021, 2023)) |>
+  mutate(total = num(total, 0), pct_idade_ign = num(pct_idade_ign, 2),
+         pct_sexo_ign = num(pct_sexo_ign, 2)) |>
+  kable(col.names = c("Ano", "Óbitos", "% idade ignorada", "% sexo ignorado"),
+        align = "lrrr")
+```
+
+```{r}
+#| label: fig-cobertura
+#| fig-cap: "Óbitos do SIM em relação aos óbitos estimados pelo IBGE"
+fig(tar_read(fig_cobertura))
+```
+
+A razão entre os óbitos registrados no SIM e os óbitos implícitos nas
+projeções do IBGE é uma medida aproximada da **cobertura** do registro. Ela
+mostra o principal limite dos dados brutos: no início da série, parte dos
+óbitos não chega ao SIM, sobretudo no Norte e no Nordeste. Isso subestima a
+mortalidade e superestima a expectativa de vida (ver @sec-ibge).
 
 # Metodologia
 
+## Taxas centrais de mortalidade
+
+Para cada ano $t$, sexo e idade $x$:
+
+$$
+m_{x,t} = \frac{D_{x,t}}{E_{x,t}},
+$$
+
+com $D_{x,t}$ os óbitos do SIM (já redistribuídos) e $E_{x,t}$ a população
+em 1º de julho (aproximação da exposição ao risco).
+
+## Idades avançadas: modelo de Kannisto
+
+Acima de 80 anos, as taxas observadas são instáveis por causa de poucos
+expostos, de erros de declaração de idade e do grupo aberto 90+ da população.
+Por isso, a partir dos 80 anos usamos o **modelo logístico de Kannisto**:
+
+$$
+\mu(x) = \frac{a\,e^{b(x-80)}}{1 + a\,e^{b(x-80)}},
+$$
+
+ajustado por máxima verossimilhança de Poisson nas idades 80–89, as últimas
+com população em idade simples. Escolhemos Kannisto em vez de Gompertz por
+três motivos:
+
+* ele captura a **desaceleração** da mortalidade nas idades muito
+  avançadas, enquanto o Gompertz cresce exponencialmente sem limite;
+* é o modelo de referência do *Human Mortality Database* para idades 80+;
+* teve **AIC menor que o Gompertz em
+  `r sum(ajustes_velhice |> select(ano, sexo, modelo, aic) |> pivot_wider(names_from = modelo, values_from = aic) |> mutate(k = kannisto < gompertz) |> pull(k))`
+  dos `r nrow(ajustes_velhice) / 2` ajustes** (ano × sexo).
+
+O grupo aberto 90+ da população foi dividido em 90, 91, …, 100+ segundo a
+**população estacionária** do modelo ajustado,
+$w_x \propto \int_x^{x+1} S(t)\,dt$. A @fig-censo compara essa divisão com a
+distribuição observada no Censo 2022.
+
+```{r}
+#| label: fig-suavizacao
+#| fig-cap: "Taxas observadas e suavizadas nas idades avançadas (2019)"
+fig(tar_read(fig_suaviz))
+```
+
+```{r}
+#| label: fig-censo
+#| fig-cap: "Divisão do grupo 90+ pelo modelo e pelo Censo 2022"
+fig(tar_read(fig_censo))
+```
+
+## Funções da tábua
+
+* $q_x = \dfrac{m_x}{1 + (1 - a_x)\,m_x}$, com $q_{100+} = 1$;
+* $a_0$ pelas fórmulas de **Coale-Demeny** (Preston, Heuveline e Guillot,
+  2001, Tabela 3.3): para homens, $a_0 = 0{,}045 + 2{,}684\,m_0$; para mulheres,
+  $a_0 = 0{,}053 + 2{,}800\,m_0$ (quando $m_0 < 0{,}107$);
+* $a_1$ supondo força de mortalidade exponencialmente decrescente entre 1 e 2
+  anos, $a_1 = 1/k - 1/(e^k - 1)$ com $k = \ln(m_1/m_2)$. Isso dá cerca de 0,44
+  em vez de 0,5, porque no segundo ano de vida os óbitos se concentram nos
+  primeiros meses;
+* $a_x = 0{,}5$ nas demais idades fechadas;
+* $l_0 = 100.000$, $l_{x+1} = l_x(1 - q_x)$, $d_x = l_x q_x$,
+  $L_x = l_{x+1} + a_x d_x$, $L_{100+} = l_{100}/m_{100+}$,
+  $T_x = \sum_{y \ge x} L_y$ e $e_x = T_x / l_x$.
+
+## Lee-Carter
+
+O modelo de Lee e Carter (1992) decompõe o log da força de mortalidade em
+
+$$
+\log \mu_{x,t} = a_x + b_x\,k_t,
+$$
+
+em que $a_x$ é o padrão etário médio, $k_t$ é um índice do nível geral de
+mortalidade e $b_x$ é a sensibilidade de cada idade a $k_t$. O ajuste usa
+`StMoMo::lc(link = "log")`, que supõe
+$D_{x,t} \sim \text{Poisson}(E_{x,t}\,\mu_{x,t})$ (Brouhns, Denuit e
+Vermunt, 2002), com $\sum_x b_x = 1$ e $\sum_t k_t = 0$, nas idades 0–100.
+Nas idades 80+, os óbitos usados são os ajustados pelo Kannisto
+($\hat m_x E_x$), para manter a coerência com a tábua.
+
+O índice $k_t$ é projetado por um **ARIMA(0,1,0) com drift** (passeio
+aleatório com tendência). Os intervalos de e0 e e65 vêm de 1.000 trajetórias
+simuladas de $k_t$, cada uma convertida em uma tábua completa.
+
+**Cenários:**
+
+* **pré-COVID**: ajuste em 2000–2019;
+* **com COVID**: ajuste em 2000–2023, incluindo 2020–2021.
+
 # Resultados
 
+## Tábuas de mortalidade
+
+```{r}
+#| label: fig-mx
+#| fig-cap: "Taxas centrais de mortalidade por idade, anos selecionados"
+fig(tar_read(fig_mx))
+```
+
+```{r}
+#| label: tbl-tabua
+#| tbl-cap: "Extrato da tábua de 2023 (idades selecionadas)"
+tabuas |>
+  filter(ano == 2023, idade %in% c(0, 1, 5, 20, 40, 60, 65, 80, 90, 100)) |>
+  select(sexo, idade, qx, lx, ex) |>
+  pivot_wider(names_from = sexo, values_from = c(qx, lx, ex)) |>
+  transmute(Idade = ifelse(idade == 100, "100+", idade),
+            `qx (H)` = formatC(qx_Masculino, format = "f", digits = 5),
+            `qx (M)` = formatC(qx_Feminino, format = "f", digits = 5),
+            `lx (H)` = num(lx_Masculino, 0), `lx (M)` = num(lx_Feminino, 0),
+            `ex (H)` = num(ex_Masculino, 2), `ex (M)` = num(ex_Feminino, 2)) |>
+  kable(align = "rrrrrrr")
+```
+
+As tábuas completas de todos os anos estão em
+`data/processed/tabuas_mortalidade.parquet`.
+
+## Comparação com o IBGE {#sec-ibge}
+
+```{r}
+#| label: fig-e0-ibge
+#| fig-cap: "e0 calculada com dados do SIM e e0 oficial do IBGE"
+fig(tar_read(fig_e0_ibge))
+```
+
+```{r}
+#| label: tbl-e0-ibge
+#| tbl-cap: "e0 calculada e oficial (IBGE), em anos"
+comp_e0 |>
+  filter(ano %in% c(2000, 2005, 2010, 2015, 2019, 2020, 2021, 2023)) |>
+  select(ano, sexo, e0_calc, e0_ibge, dif_e0) |>
+  pivot_wider(names_from = sexo, values_from = c(e0_calc, e0_ibge, dif_e0)) |>
+  transmute(Ano = ano,
+            `Calc. (H)` = num(e0_calc_Masculino, 2), `IBGE (H)` = num(e0_ibge_Masculino, 2),
+            `Dif. (H)` = num(dif_e0_Masculino, 2),
+            `Calc. (M)` = num(e0_calc_Feminino, 2), `IBGE (M)` = num(e0_ibge_Feminino, 2),
+            `Dif. (M)` = num(dif_e0_Feminino, 2)) |>
+  kable(align = "rrrrrrr")
+```
+
+Em 2000, a e0 calculada supera a oficial em `r num(e0(2000, "Masculino") - e0i(2000, "Masculino"))`
+anos para homens e `r num(e0(2000, "Feminino") - e0i(2000, "Feminino"))` anos
+para mulheres. Em 2023, a diferença é de `r num(e0(2023, "Masculino") - e0i(2023, "Masculino"))`
+e `r num(e0(2023, "Feminino") - e0i(2023, "Feminino"))` anos. As diferenças
+têm três origens:
+
+1. **Sub-registro de óbitos no SIM.** O IBGE corrige o número de óbitos com
+   estimativas de cobertura, sobretudo nos estados do Norte e do Nordeste e
+   nos primeiros anos da série. Sem essa correção, a mortalidade fica
+   subestimada e a e0, superestimada. A queda da diferença ao longo do tempo
+   acompanha a melhora da cobertura (@fig-cobertura).
+2. **Mortalidade infantil.** O sub-registro de óbitos infantis é
+   historicamente maior. Como a e0 é muito sensível a $q_0$, essa é a
+   principal fonte da diferença no início do período.
+3. **Idades avançadas.** O IBGE usa métodos próprios para fechar a tábua; aqui
+   usamos Kannisto a partir dos 80 anos.
+
+Para uso atuarial, as tábuas deste projeto devem ser vistas como **tábuas de
+população geral não corrigidas**. Usá-las em precificação exigiria corrigir o
+sub-registro e ajustar ao perfil da carteira.
+
+## Lee-Carter: parâmetros
+
+```{r}
+#| label: fig-axbx
+#| fig-cap: "Parâmetros ax e bx por idade"
+fig(tar_read(fig_ax_bx))
+```
+
+O $a_x$ reproduz o formato clássico da curva de mortalidade: alto no
+primeiro ano, mínimo por volta dos 10 anos, a "corcova" de causas externas
+entre homens jovens e crescimento quase log-linear na idade adulta. O $b_x$
+mostra **em que idades a mortalidade mais caiu**: valores altos na infância
+indicam que a queda da mortalidade infantil puxou a melhora no período.
+
+```{r}
+#| label: fig-kt
+#| fig-cap: "Índice kt ajustado e projetado"
+fig(tar_read(fig_kt))
+```
+
+No cenário com COVID, o $k_t$ sobe bruscamente em 2020–2021, o que reduz a
+inclinação média (drift) da série e torna a projeção **mais pessimista**.
+O passeio aleatório trata o choque como permanente: o nível de 2023 é o
+ponto de partida, e o drift estimado incorpora o salto.
+
+## Projeção da expectativa de vida
+
+```{r}
+#| label: fig-e0-proj
+#| fig-cap: "e0 observada e projetada até 2050"
+fig(tar_read(fig_e0_proj))
+```
+
+```{r}
+#| label: fig-e65-proj
+#| fig-cap: "e65 observada e projetada até 2050"
+fig(tar_read(fig_e65_proj))
+```
+
+```{r}
+#| label: tbl-proj
+#| tbl-cap: "Expectativa de vida projetada (central e IC 95%), em anos"
+lc_e |>
+  filter(ano %in% c(2030, 2040, 2050)) |>
+  mutate(valor = paste0(num(central), " (", num(inf95), "–", num(sup95), ")"),
+         cenario = recode(cenario, pre_covid = "2000–2019", completo = "2000–2023")) |>
+  select(indicador, sexo, cenario, ano, valor) |>
+  pivot_wider(names_from = ano, values_from = valor) |>
+  arrange(indicador, sexo, cenario) |>
+  rename(Indicador = indicador, Sexo = sexo, Ajuste = cenario) |>
+  kable(align = "lllrrr")
+```
+
+Em 2050, o cenário pré-COVID projeta e0 de
+`r num(proj("pre_covid", "Feminino", "e0", 2050))` anos para mulheres e
+`r num(proj("pre_covid", "Masculino", "e0", 2050))` para homens. Com a
+COVID no ajuste, os valores caem para
+`r num(proj("completo", "Feminino", "e0", 2050))` e
+`r num(proj("completo", "Masculino", "e0", 2050))`. A **escolha da
+janela de ajuste é uma decisão atuarial relevante**: tratar 2020–2021 como
+choque transitório (excluí-lo, dar-lhe peso menor ou modelá-lo como
+*outlier*) ou como parte da tendência muda a longevidade projetada em uma
+magnitude comparável ao próprio intervalo de confiança.
+
+# Diagnóstico
+
+## Resíduos
+
+```{r}
+#| label: fig-residuos
+#| fig-cap: "Resíduos de deviance — ajuste 2000–2023"
+fig(tar_read(fig_residuos))
+```
+
+```{r}
+#| label: fig-residuos-pre
+#| fig-cap: "Resíduos de deviance — ajuste 2000–2019"
+fig(tar_read(fig_residuos_pre))
+```
+
+Os resíduos de um Lee-Carter bem especificado não deveriam ter padrão. Aqui
+há três estruturas conhecidas:
+
+* **2020–2021** aparecem como colunas fortemente positivas nas idades
+  adultas e idosas: a COVID elevou a mortalidade de um modo que um único
+  $b_x$ não descreve;
+* **diagonais** indicam efeito de coorte, que o Lee-Carter ignora (o modelo
+  de Renshaw-Haberman o incluiria);
+* nas **idades 80+**, os resíduos refletem a variação ano a ano dos
+  parâmetros do Kannisto, que não segue exatamente a estrutura $a_x + b_x k_t$.
+
+## Backtesting
+
+O modelo foi ajustado em 2000–2014 e projetado para 2015–2019; as projeções
+foram comparadas com as tábuas observadas.
+
+```{r}
+#| label: fig-backtest
+#| fig-cap: "Backtesting: e0 projetada × observada (2015–2019)"
+fig(tar_read(fig_backtest))
+```
+
+```{r}
+#| label: tbl-backtest
+#| tbl-cap: "Erros do backtesting"
+backtest |>
+  transmute(Sexo = sexo, Ano = ano, `e0 proj.` = num(e0_proj, 2),
+            `e0 obs.` = num(e0_obs, 2), `Erro (anos)` = num(erro_e0, 2),
+            `Dentro do IC 95%` = ifelse(dentro_ic95, "sim", "não"),
+            `RMSE log mx` = num(rmse_log_mx, 3)) |>
+  kable(align = "llrrrcr")
+```
+
+O erro absoluto médio da e0 foi de
+`r num(mean(abs(backtest$erro_e0)), 2)` ano, e
+`r sum(backtest$dentro_ic95)` de `r nrow(backtest)` observações ficaram dentro
+do IC 95%.
+
 # Limitações
+
+* **Sub-registro**: os óbitos do SIM não foram corrigidos pela cobertura. As
+  tábuas tendem a superestimar a longevidade, sobretudo no início do período.
+* **Exposição**: usa-se a população em 1º de julho como aproximação da
+  exposição ao risco, e a população vem de projeções (não de contagens),
+  revisadas após o Censo 2022.
+* **Idades 90+**: a divisão do grupo aberto depende do modelo de Kannisto e
+  da hipótese de população estacionária, que ignora o crescimento das
+  coortes.
+* **Lee-Carter**: um único fator ($b_x$ fixo) não capta mudanças no padrão
+  etário da melhora nem efeitos de coorte. Os intervalos consideram só a
+  incerteza de $k_t$, não a dos parâmetros $a_x$ e $b_x$, e por isso são
+  estreitos.
+* **COVID**: nenhum dos cenários modela explicitamente o choque; os dois
+  limites (excluir ou incluir sem tratamento) servem como referência.
+
+# Referências
+
+* BROUHNS, N.; DENUIT, M.; VERMUNT, J. K. A Poisson log-bilinear regression
+  approach to the construction of projected lifetables. *Insurance:
+  Mathematics and Economics*, v. 31, n. 3, p. 373–393, 2002.
+* COALE, A. J.; DEMENY, P. *Regional model life tables and stable
+  populations*. 2. ed. New York: Academic Press, 1983.
+* IBGE. *Projeções da população do Brasil e Unidades da Federação: revisão
+  2024*. Rio de Janeiro: IBGE, 2024.
+* LEE, R. D.; CARTER, L. R. Modeling and forecasting U.S. mortality.
+  *Journal of the American Statistical Association*, v. 87, n. 419,
+  p. 659–671, 1992.
+* PRESTON, S. H.; HEUVELINE, P.; GUILLOT, M. *Demography: measuring and
+  modeling population processes*. Oxford: Blackwell, 2001.
+* THATCHER, A. R.; KANNISTO, V.; VAUPEL, J. W. *The force of mortality at
+  ages 80 to 120*. Odense: Odense University Press, 1998.
+* VILLEGAS, A. M.; KAISHEV, V. K.; MILLOSSOVICH, P. StMoMo: an R package for
+  stochastic mortality modeling. *Journal of Statistical Software*, v. 84,
+  n. 3, p. 1–38, 2018.
