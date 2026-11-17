@@ -79,8 +79,35 @@ list(
   tar_target(fig_e0_ibge, salvar_figura(grafico_e0_ibge(comp_e0), "e0_vs_ibge"),
              format = "file"),
   tar_target(fig_censo, salvar_figura(grafico_abertura_censo(comp_censo), "abertura_90_censo"),
+             format = "file"),
+
+  # Etapa 4 — Lee-Carter ----------------------------------------------------
+  tar_target(ibge_proj, ler_indicadores_ibge(ibge_ind_raw, 2000:cfg$horizonte)),
+  tar_target(lc, rodar_lee_carter(mx, cfg, nsim = 1000)),
+  tar_target(backtest, purrr::map_dfr(cfg$sexos, \(s) backtest_lc(
+    mx, tabuas, s, cfg$backtest$ajuste, cfg$backtest$teste))),
+
+  tar_target(lc_e_parquet, salvar_parquet(lc$e, "lc_projecao_e0_e65"), format = "file"),
+  tar_target(lc_kt_parquet, salvar_parquet(lc$kt, "lc_kt"), format = "file"),
+  tar_target(lc_par_parquet, salvar_parquet(lc$parametros, "lc_ax_bx"), format = "file"),
+  tar_target(backtest_parquet, salvar_parquet(backtest, "lc_backtest"), format = "file"),
+
+  tar_target(fig_ax_bx, salvar_figura(grafico_ax_bx(lc$parametros), "lc_ax_bx"),
+             format = "file"),
+  tar_target(fig_kt, salvar_figura(grafico_kt(lc$kt), "lc_kt"), format = "file"),
+  tar_target(fig_e0_proj, salvar_figura(
+    grafico_e_projetada(lc$e, tabuas, "e0", ibge_proj), "lc_e0_projetada"),
+    format = "file"),
+  tar_target(fig_e65_proj, salvar_figura(
+    grafico_e_projetada(lc$e, tabuas, "e65"), "lc_e65_projetada"), format = "file"),
+  tar_target(fig_residuos, salvar_figura(
+    grafico_residuos(lc$residuos, "completo"), "lc_residuos", altura = 5.5),
+    format = "file"),
+  tar_target(fig_residuos_pre, salvar_figura(
+    grafico_residuos(lc$residuos, "pre_covid"), "lc_residuos_pre_covid", altura = 5.5),
+    format = "file"),
+  tar_target(fig_backtest, salvar_figura(grafico_backtest(backtest), "lc_backtest"),
              format = "file")
 
-  # Etapa 4 — Lee-Carter (ajuste, projeção, diagnóstico, backtesting)
   # Etapa 5 — relatório Quarto
 )
