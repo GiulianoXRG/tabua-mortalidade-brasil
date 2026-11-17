@@ -34,5 +34,5 @@ test_that("expectativas_de_taxas bate com life_table", {
   taxas <- m$Dxt / m$Ext
   e <- expectativas_de_taxas(taxas, "Feminino")
   esperado <- life_table(taxas[, 1], 0:100, "Feminino")$ex[c(1, 66)]
-  expect_equal(unname(e[, 1]), esperado)
+  expect_equal(unname(e[, 1]), unname(esperado))
 })
