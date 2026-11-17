@@ -68,6 +68,7 @@ list(
   tar_target(ajustes_velhice, resultado_tabuas$ajustes),
   tar_target(comp_e0, comparar_e0_ibge(tabuas, indicadores_ibge)),
   tar_target(comp_censo, comparar_abertura_censo(mx, censo2022, 2022)),
+  tar_target(valid_velhice, validar_velhice_censo(obitos, populacao, censo2022, 2022)),
 
   tar_target(tabuas_parquet, salvar_parquet(tabuas, "tabuas_mortalidade"), format = "file"),
   tar_target(mx_parquet, salvar_parquet(mx, "mx_exposicao"), format = "file"),

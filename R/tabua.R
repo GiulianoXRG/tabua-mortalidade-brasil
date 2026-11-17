@@ -200,3 +200,36 @@ comparar_abertura_censo <- function(mx, censo, ano = 2022) {
     dplyr::select("sexo", "idade", "prop", "fonte")
   dplyr::bind_rows(modelo, censo_p)
 }
+
+#' Valida Kannisto e Gompertz fora da faixa de ajuste (90–99) com o Censo 2022
+#'
+#' Ajusta os dois modelos em 80–89 (ano de 2022) e compara as taxas previstas
+#' em 90–99 com as observadas, calculadas com os óbitos do SIM e a população
+#' do Censo 2022, reescalada para o total 90+ do IBGE.
+#'
+#' @param obitos Óbitos redistribuídos.
+#' @param populacao População IBGE.
+#' @param censo Saída de [ler_censo_sidra()].
+#' @param ano Ano da validação.
+#' @return Tibble com `sexo`, `idade`, `mx_obs`, `kannisto`, `gompertz`.
+#' @export
+validar_velhice_censo <- function(obitos, populacao, censo, ano = 2022) {
+  purrr::map_dfr(c("Masculino", "Feminino"), function(s) {
+    o <- obitos[obitos$ano == ano & obitos$sexo == s, ]
+    p <- populacao[populacao$ano == ano & populacao$sexo == s, ]
+    cs <- censo[censo$sexo == s, ]
+    x <- 80:89
+    d <- o$obitos[match(x, o$idade)]
+    e <- p$pop[match(x, p$idade)]
+    k <- ajustar_velhice(d, e, x, "kannisto")
+    g <- ajustar_velhice(d, e, x, "gompertz")
+    xi <- 90:99
+    fator <- p$pop[p$idade == 90] / sum(cs$pop[cs$idade >= 90])
+    tibble::tibble(
+      sexo = s, idade = xi,
+      mx_obs = o$obitos[match(xi, o$idade)] / (cs$pop[match(xi, cs$idade)] * fator),
+      kannisto = mu_velhice(xi + 0.5, k$a, k$b, "kannisto"),
+      gompertz = mu_velhice(xi + 0.5, g$a, g$b, "gompertz")
+    )
+  })
+}
