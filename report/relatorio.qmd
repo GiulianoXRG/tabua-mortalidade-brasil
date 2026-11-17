@@ -1,0 +1,23 @@
+---
+title: "Tábua de mortalidade brasileira e projeção Lee-Carter"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: true
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+---
+
+# Introdução
+
+# Dados
+
+# Metodologia
+
+# Resultados
+
+# Limitações
